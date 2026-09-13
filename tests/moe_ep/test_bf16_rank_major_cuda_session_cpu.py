@@ -18,18 +18,36 @@ import torch
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_PACKAGE_ROOT = (
+_SOURCE_PACKAGE_ROOT = (
     _PROJECT_ROOT / "flashinfer" / "moe_ep" / "kernel_src" / "blackwell_bf16_rank_major"
 )
-_SESSION_PATH = _PACKAGE_ROOT / "session.py"
 _SOURCE_NAME = "flashinfer_blackwell_moe_ep_layer_sm100.cu"
+
+
+@cache
+def _package_root() -> Path:
+    if _SOURCE_PACKAGE_ROOT.is_dir():
+        return _SOURCE_PACKAGE_ROOT
+
+    # Nightly copies tests outside the checkout. Locate the installed package
+    # without importing its tree, preserving the session's CPU-only contract.
+    spec = importlib.util.find_spec("flashinfer")
+    assert spec is not None and spec.submodule_search_locations
+    return (
+        Path(next(iter(spec.submodule_search_locations)))
+        / "moe_ep"
+        / "kernel_src"
+        / "blackwell_bf16_rank_major"
+    )
 
 
 @cache
 def _session_module():
     """Load the host contract without importing the FlashInfer package tree."""
     module_name = "_flashinfer_bf16_rank_major_session_cpu_contract"
-    spec = importlib.util.spec_from_file_location(module_name, _SESSION_PATH)
+    spec = importlib.util.spec_from_file_location(
+        module_name, _package_root() / "session.py"
+    )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
@@ -155,7 +173,7 @@ def test_packaged_source_manifest_is_complete_and_self_consistent():
     module = _session_module()
     manifest, source_path = module._load_manifest()
 
-    assert source_path == _PACKAGE_ROOT / "src" / _SOURCE_NAME
+    assert source_path == _package_root() / "src" / _SOURCE_NAME
     assert (
         manifest["source_sha256"]
         == hashlib.sha256(source_path.read_bytes()).hexdigest()
@@ -164,7 +182,10 @@ def test_packaged_source_manifest_is_complete_and_self_consistent():
 
 
 def test_package_data_declares_the_immutable_source_pair():
-    pyproject = (_PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    pyproject_path = _PROJECT_ROOT / "pyproject.toml"
+    if not pyproject_path.is_file():
+        pytest.skip("pyproject.toml is only available in source-tree test runs")
+    pyproject = pyproject_path.read_text(encoding="utf-8")
     key = '"flashinfer.moe_ep.kernel_src.blackwell_bf16_rank_major" = ['
     assert key in pyproject
     package_block = pyproject.split(key, maxsplit=1)[1].split("]", maxsplit=1)[0]
